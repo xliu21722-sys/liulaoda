@@ -1,0 +1,11 @@
+.DS_Store
+build/
+dist/
+.build/
+*.dSYM/
+*.swiftmodule
+*.swiftdoc
+*.swiftsourceinfo
+.env
+.env.*
+!.env.example
