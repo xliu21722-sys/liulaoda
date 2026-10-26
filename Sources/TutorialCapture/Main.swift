@@ -59,8 +59,8 @@ private final class MainWindowRegistry {
     var window: NSWindow?
 }
 
-// A preview must join the current Space without activating a hidden main window
-// on another desktop. It stays at normal window level and yields to other apps.
+// Join the current Space before activation so the preview, rather than a hidden
+// settings window, becomes the app's main window. Keep ordinary window stacking.
 private final class CapturePreviewPanel: NSPanel {
     init(contentRect: CGRect) {
         super.init(contentRect: contentRect, styleMask: [.titled, .closable, .miniaturizable, .resizable, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -73,7 +73,7 @@ private final class CapturePreviewPanel: NSPanel {
         collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .canJoinAllApplications]
     }
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { false }
+    override var canBecomeMain: Bool { true }
 }
 
 struct ClipSegment: Identifiable {
@@ -146,6 +146,7 @@ enum CaptureMode: String, CaseIterable, Identifiable {
     private var recordingOverlay: RecordingOverlayController?
     private var recoveryWindow: NSWindow?
     private var capturePreviewWindow: NSWindow?
+    private var previewPresentationID = UUID()
     private var quickSaveRequested = false
     private var playbackObserver:Any?
     private var recordingContentTask: Task<SCShareableContent, Error>?
@@ -244,9 +245,12 @@ enum CaptureMode: String, CaseIterable, Identifiable {
     }
     private func showCapturePreviewWindow() {
         guard showPreview else { return }
+        let presentationID = UUID()
+        previewPresentationID = presentationID
         DispatchQueue.main.async {
+            guard self.showPreview, self.previewPresentationID == presentationID else { return }
             let window: NSWindow
-            if let existing = self.capturePreviewWindow {
+            if let existing = self.capturePreviewWindow ?? CapturePreviewWindowRegistry.shared.window {
                 window = existing
             } else {
                 let created = CapturePreviewPanel(contentRect: CGRect(x: 0, y: 0, width: 760, height: self.mediaType == "png" ? 440 : 760))
@@ -259,6 +263,12 @@ enum CaptureMode: String, CaseIterable, Identifiable {
                 CapturePreviewWindowRegistry.shared.window = created
                 window = created
             }
+            self.capturePreviewWindow = window
+            CapturePreviewWindowRegistry.shared.window = window
+            self.hideSettingsWindows()
+            for duplicate in NSApp.windows where duplicate !== window && duplicate.identifier?.rawValue == "TutorialCapture.PreviewWindow" {
+                duplicate.orderOut(nil)
+            }
             window.title = self.mediaType == "png" ? "截图预览 - 刘老大" : "录屏预览 - 刘老大"
             window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .canJoinAllApplications]
             if let screen = self.captureScreenAtPointer() {
@@ -270,10 +280,27 @@ enum CaptureMode: String, CaseIterable, Identifiable {
             if window.isMiniaturized { window.deminiaturize(nil) }
             window.orderFrontRegardless()
             window.makeKeyAndOrderFront(nil)
+            window.makeMain()
+            NSApp.activate(ignoringOtherApps: true)
+            // Activation and SwiftUI window updates may complete on the next turn.
+            // A stale request must never reopen a preview that was just closed.
+            DispatchQueue.main.async {
+                guard self.showPreview, self.previewPresentationID == presentationID, window.isVisible else { return }
+                self.hideSettingsWindows()
+                window.orderFrontRegardless()
+                window.makeKeyAndOrderFront(nil)
+            }
         }
     }
-    private func hideMainWindow() {
+    private func hideSettingsWindows() {
+        for window in NSApp.windows where window.identifier?.rawValue == "TutorialCapture.MainWindow" {
+            window.orderOut(nil)
+        }
         MainWindowRegistry.shared.window?.orderOut(nil)
+    }
+    private func hideMainWindow() {
+        previewPresentationID = UUID()
+        hideSettingsWindows()
         capturePreviewWindow?.orderOut(nil)
     }
     func leaveSavedPreview() { stopVideoPlayer(); showPreview=false; isSavedPreview=false; currentSavedURL=nil; previewVideo=nil; previewImage=nil; status="素材列表已更新"; hideMainWindow() }
@@ -855,7 +882,7 @@ struct ContentView: View {
     let isPreviewWindow: Bool
     init(isPreviewWindow: Bool = false) { self.isPreviewWindow = isPreviewWindow }
     var body: some View { VStack(spacing:0) {
-        if m.showPreview { preview } else {
+        if isPreviewWindow { preview } else {
             ScrollView(.vertical) {
                 main.frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -949,10 +976,11 @@ struct ContentView: View {
 
     private func fitWindowToCurrentMode() {
         DispatchQueue.main.async {
+            guard isPreviewWindow || !m.showPreview else { return }
             let window = isPreviewWindow ? CapturePreviewWindowRegistry.shared.window : MainWindowRegistry.shared.window
             guard let window else { return }
-            let isScreenshotPreview = m.showPreview && m.mediaType == "png"
-            let isVideoPreview = m.showPreview && m.mediaType == "mp4"
+            let isScreenshotPreview = isPreviewWindow && m.showPreview && m.mediaType == "png"
+            let isVideoPreview = isPreviewWindow && m.showPreview && m.mediaType == "mp4"
             let targetWidth: CGFloat = isVideoPreview ? 1000 : 760
             let targetHeight: CGFloat = isScreenshotPreview ? 440 : (isVideoPreview ? 760 : 520)
             let visible = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame
